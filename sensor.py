@@ -17,7 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MEASUREMENT_TYPES, MODEL, USER_PROFILES
 
-# _LOGGER = logging.getLogger(**name**)
+_LOGGER = logging.getLogger(DOMAIN)
 
 
 async def async_setup_entry(
@@ -48,7 +48,7 @@ async def async_setup_entry(
                 )
             )
 
-            async_add_entities(sensors)
+    async_add_entities(sensors)
 
 
 class BeurerBF915Sensor(CoordinatorEntity, SensorEntity):
@@ -100,6 +100,8 @@ class BeurerBF915Sensor(CoordinatorEntity, SensorEntity):
         # Set state class for numerical measurements
         if unit and measurement_type != "body_type":
             self._attr_state_class = SensorStateClass.MEASUREMENT
+
+        _LOGGER.debug("Setting %s for user %s", measurement_type, user_id)
 
         # Set device info
         self._attr_device_info = DeviceInfo(

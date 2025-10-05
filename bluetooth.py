@@ -6,9 +6,9 @@ import struct
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .const import CHARACTERISTIC_UUID, CMD_INIT, SERVICE_UUID, USER_PROFILES
+from .const import CHARACTERISTIC_UUID, CMD_INIT, DOMAIN, SERVICE_UUID, USER_PROFILES
 
-_LOGGER = logging.getLogger("Beurer")
+_LOGGER = logging.getLogger(DOMAIN)
 
 
 class BeurerBF915Device:
@@ -96,7 +96,7 @@ class BeurerBF915Device:
             for device in devices:
                 if device.address.upper() == self.address.upper():
                     scale_found = True
-                    _LOGGER.info(f"Found scale: {device.name} (RSSI: {device.rssi})")
+                    _LOGGER.info(f"Found scale: {device.name} (RSSI: {getattr(device, "rssi", None)})")
 
                     # Try to connect
                     await self._connect_and_read()
@@ -109,7 +109,7 @@ class BeurerBF915Device:
                 # Don't log as error - this is normal when scale is sleeping
 
         except Exception as e:
-            _LOGGER.error(f"Update error: {e}")
+            _LOGGER.error(f"Update error: {e}", exc_info=True)
         finally:
             self._is_scanning = False
 
@@ -222,7 +222,7 @@ class BeurerBF915Device:
                     _LOGGER.debug("Disconnected")
 
         except Exception as e:
-            _LOGGER.error(f"Connection error: {e}")
+            _LOGGER.error(f"Connection error: {e}", exc_info=True)
 
     def _process_notification(self, data: bytearray):
         """Process a notification from the scale."""

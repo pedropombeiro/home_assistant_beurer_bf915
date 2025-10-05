@@ -11,7 +11,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .bluetooth import BeurerBF915Device
 from .const import DOMAIN, SCAN_INTERVAL
 
-_LOGGER = logging.getLogger("Beurer")
+_LOGGER = logging.getLogger(DOMAIN)
 
 PLATFORMS = [Platform.SENSOR]
 
