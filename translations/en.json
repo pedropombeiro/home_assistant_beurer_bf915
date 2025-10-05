@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select Beurer BF 915 Scale",
+        "description": "Select your scale from the list of discovered devices.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "confirm": {
+        "title": "Confirm Device",
+        "description": "Do you want to add the Beurer BF 915 scale '{name}' to Home Assistant?"
+      },
+      "manual": {
+        "title": "Manual Configuration",
+        "description": "Enter the MAC address of your Beurer BF 915 scale.",
+        "data": {
+          "address": "MAC Address"
+        }
+      }
+    },
+    "error": {
+      "no_devices_found": "No Beurer BF 915 scales found. Make sure the scale is nearby and has been activated by stepping on it.",
+      "invalid_mac": "Invalid MAC address format. Use format XX:XX:XX:XX:XX:XX"
+    },
+    "abort": {
+      "already_configured": "This device is already configured"
+    }
+  }
+}
+

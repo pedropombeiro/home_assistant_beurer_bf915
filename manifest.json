@@ -1,0 +1,19 @@
+{
+  "domain": "beurer_bf915",
+  "name": "Beurer BF 915 Smart Scale",
+  "version": "1.0.0",
+  "documentation": "https://github.com/yourusername/beurer_bf915",
+  "issue_tracker": "https://github.com/yourusername/beurer_bf915/issues",
+  "dependencies": ["bluetooth_adapters"],
+  "bluetooth": [
+    {
+      "local_name": "BF915 *",
+      "service_uuid": "0000ffe0-0000-1000-8000-00805f9b34fb"
+    }
+  ],
+  "codeowners": ["@yourusername"],
+  "requirements": ["bleak>=0.21.0"],
+  "iot_class": "local_push",
+  "config_flow": true
+}
+
