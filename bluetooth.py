@@ -1,4 +1,4 @@
-"""Bluetooth communication for Beurer BF 915 - ESPHome Proxy Version."""
+"""Bluetooth communication for Beurer BF 915."""
 
 import asyncio
 import logging
@@ -6,42 +6,44 @@ import struct
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from homeassistant.components import bluetooth
-from homeassistant.components.bluetooth import (
-    BluetoothServiceInfoBleak,
-    async_ble_device_from_address,
-)
-
 from .const import CHARACTERISTIC_UUID, CMD_INIT, SERVICE_UUID, USER_PROFILES
 
-_LOGGER = logging.getLogger("beurer_bf915")
+_LOGGER = logging.getLogger("Beurer")
 
 
 class BeurerBF915Device:
-    """Beurer BF 915 device for ESPHome Bluetooth Proxy."""
+    """Representation of a Beurer BF 915 device."""
 
     def __init__(self, hass, ble_device):
         """Initialize the device."""
         self.hass = hass
+        self.ble_device = ble_device
         self._measurements = {}
-        self._is_updating = False
-        self._last_error = None
+        self._last_update = None
+        self._is_scanning = False
 
-        # Extract address
+        # Extract address from ble_device (handle different object types)
         if hasattr(ble_device, "address"):
-            self.address = ble_device.address.upper()
+            self.address = ble_device.address
+        elif hasattr(ble_device, "get") and callable(ble_device.get):
+            self.address = ble_device.get("address", "unknown")
         else:
-            self.address = str(ble_device).upper()
+            self.address = str(ble_device)
 
-        _LOGGER.info(f"BF 915 ESPHome Proxy version initialized for: {self.address}")
+        _LOGGER.info(f"Initialized Beurer BF 915 device for address: {self.address}")
 
-        # Initialize measurements
+        # Initialize measurements with default values
         for user_id, profile in USER_PROFILES.items():
-            self._measurements[user_id] = self._create_empty_measurement(user_id)
+            self._measurements[user_id] = self._get_default_measurements(user_id)
 
-    def _create_empty_measurement(self, user_id: int) -> Dict[str, Any]:
-        """Create empty measurement dict."""
+    def _get_default_measurements(self, user_id: int) -> Dict[str, Any]:
+        """Get default measurements for a user."""
         profile = USER_PROFILES[user_id]
+        # Calculate a reasonable default BMI
+        height_m = profile["height"] / 100
+        default_weight = 70 if profile["gender"] == "male" else 60
+        default_bmi = default_weight / (height_m**2)
+
         return {
             "timestamp": datetime.now(),
             "weight": 0.0,
@@ -49,276 +51,265 @@ class BeurerBF915Device:
             "water": 0.0,
             "muscle": 0.0,
             "bone_mass": 0.0,
-            "bmi": 0.0,
-            "bmr": 0,
-            "amr": 0,
+            "bmi": round(default_bmi, 1),
+            "bmr": 1500 if profile["gender"] == "male" else 1200,
+            "amr": 2000 if profile["gender"] == "male" else 1600,
             "visceral_fat": 0,
             "metabolic_age": profile["age"],
             "body_type": "Unknown",
         }
 
     async def async_update(self) -> Dict[int, Dict[str, Any]]:
-        """Update data from scale via ESPHome proxy."""
-        if self._is_updating:
-            _LOGGER.debug("Already updating, skipping")
+        """Update data from the scale."""
+        if self._is_scanning:
+            _LOGGER.debug("Already scanning, skipping update")
             return self._measurements
 
-        self._is_updating = True
+        self._is_scanning = True
 
         try:
-            # Get device via Home Assistant's Bluetooth system
-            # This ensures we use the proxy that can reach the device
-            device = async_ble_device_from_address(
-                self.hass,
-                self.address,
-                connectable=True,  # We need a connectable device
-            )
-
-            if not device:
-                _LOGGER.debug(f"Device {self.address} not found via proxy")
+            # Check if bleak is available
+            try:
+                from bleak import BleakClient, BleakScanner
+            except ImportError:
+                _LOGGER.error(
+                    "Bleak library not available. Please restart Home Assistant after installation."
+                )
                 return self._measurements
 
-            _LOGGER.info(f"Found device via proxy: {device}")
+            # Quick scan to see if scale is advertising
+            _LOGGER.debug(f"Scanning for scale at {self.address}")
 
-            # Try to connect using bleak with ESPHome backend
-            await self._connect_via_proxy(device)
+            scanner = BleakScanner()
+            devices = []
+
+            try:
+                # Short scan with timeout
+                devices = await asyncio.wait_for(scanner.discover(), timeout=5.0)
+            except asyncio.TimeoutError:
+                _LOGGER.debug("Scan timeout - scale might be sleeping")
+            except Exception as e:
+                _LOGGER.debug(f"Scan error: {e}")
+
+            # Check if our scale was found
+            scale_found = False
+            for device in devices:
+                if device.address.upper() == self.address.upper():
+                    scale_found = True
+                    _LOGGER.info(f"Found scale: {device.name} (RSSI: {device.rssi})")
+
+                    # Try to connect
+                    await self._connect_and_read()
+                    break
+
+            if not scale_found:
+                _LOGGER.debug(
+                    f"Scale {self.address} not found in scan (found {len(devices)} other devices)"
+                )
+                # Don't log as error - this is normal when scale is sleeping
 
         except Exception as e:
             _LOGGER.error(f"Update error: {e}")
-            self._last_error = str(e)
         finally:
-            self._is_updating = False
+            self._is_scanning = False
 
         return self._measurements
 
-    async def _connect_via_proxy(self, device):
-        """Connect to device via ESPHome proxy."""
-        from bleak import BleakClient
-        from bleak_retry_connector import establish_connection
-
-        client = None
-
+    async def _connect_and_read(self):
+        """Connect to the scale and attempt to read data."""
         try:
-            _LOGGER.info(f"Attempting proxy connection to {self.address}")
+            from bleak import BleakClient
 
-            client = await establish_connection(
-                BleakClient,
-                device,
-                name=self.address,
-                disconnected_callback=lambda _: _LOGGER.debug("Device disconnected"),
-                use_services_cache=True,  # Add this
-                ble_device_callback=lambda: device,  # Add this
-            )
+            _LOGGER.info(f"Attempting to connect to {self.address}")
 
-            _LOGGER.info("✓ Connected via proxy!")
+            # Create client with timeout
+            client = BleakClient(self.address, timeout=10.0)
 
-            # Skip the service discovery section entirely
-            # Go straight to communication
-            await self._communicate_simple(client)
-
-        except asyncio.TimeoutError:
-            _LOGGER.error("Proxy connection timeout")
-        except Exception as e:
-            _LOGGER.error(f"Proxy connection error: {e}", exc_info=True)
-        finally:
-            if client and client.is_connected:
-                await client.disconnect()
-
-    async def _communicate_simple(self, client):
-        """Simple communication without complex service checking."""
-        try:
-            # Send init command
             try:
-                # Verify characteristic exists
-                services = await client.get_services()
-                char = services.get_characteristic(CHARACTERISTIC_UUID)
-                if not char:
+                # Connect
+                connected = await client.connect()
+
+                if not connected:
+                    _LOGGER.warning("Connection failed")
+                    return
+
+                _LOGGER.info("Connected successfully!")
+
+                # Discover services
+                services = client.services
+                service_found = False
+                char_found = False
+
+                for service in services:
+                    _LOGGER.debug(f"Service: {service.uuid}")
+                    if SERVICE_UUID.lower() in service.uuid.lower():
+                        service_found = True
+
+                        for char in service.characteristics:
+                            _LOGGER.debug(f"  Characteristic: {char.uuid}")
+                            if CHARACTERISTIC_UUID.lower() in char.uuid.lower():
+                                char_found = True
+                                _LOGGER.debug(f"    Properties: {char.properties}")
+
+                if not service_found:
+                    _LOGGER.error(f"Service {SERVICE_UUID} not found")
+                    return
+
+                if not char_found:
                     _LOGGER.error(f"Characteristic {CHARACTERISTIC_UUID} not found")
                     return
 
-                _LOGGER.debug("Sending init command")
-                await client.write_gatt_char(
-                    CHARACTERISTIC_UUID, CMD_INIT, response=True
-                )
-                _LOGGER.info("Init command sent")
-            except Exception as e:
-                _LOGGER.warning(f"Init command failed: {e}")
-                # Continue anyway
+                # Setup notification handler
+                self._notification_buffer = []
 
-            await asyncio.sleep(1)
+                def notification_handler(sender, data):
+                    """Handle notifications."""
+                    _LOGGER.debug(f"Notification from {sender}: {data.hex()}")
+                    self._notification_buffer.append(data)
 
-            # Setup notifications
-            received_data = []
-
-            def notification_handler(sender, data):
-                """Handle notifications from scale."""
-                _LOGGER.info(f"✓ Data received: {len(data)} bytes")
-                received_data.append(data)
-                # Parse immediately
-                self._parse_measurement(data)
-
-            # Start notifications
-            try:
+                # Start notifications
                 await client.start_notify(CHARACTERISTIC_UUID, notification_handler)
-                _LOGGER.info("Notifications enabled")
-            except Exception as e:
-                _LOGGER.error(f"Failed to start notifications: {e}")
-                return
 
-            # Request measurements for each user
-            for user_id, profile in USER_PROFILES.items():
-                try:
-                    gender_byte = 0x01 if profile["gender"] == "male" else 0x00
+                # Send init command
+                _LOGGER.debug("Sending initialization command")
+                await client.write_gatt_char(
+                    CHARACTERISTIC_UUID, CMD_INIT, response=False
+                )
 
-                    # Build user command
-                    user_cmd = bytes(
-                        [
-                            0xE7,
-                            0x41,  # Command
-                            user_id,  # User ID
-                            gender_byte,  # Gender
-                            profile["age"],  # Age
-                            profile["height"],  # Height in cm
-                            0x03,  # Activity level
-                            0x00,
-                            0x00,
-                            0x00,  # Reserved
-                        ]
-                    )
+                # Wait for response
+                await asyncio.sleep(1)
 
+                # Request data for each user
+                for user_id, profile in USER_PROFILES.items():
                     _LOGGER.debug(
-                        f"Requesting data for user {user_id}: {profile['name']}"
+                        f"Requesting data for {profile['name']} (user {user_id})"
                     )
+
+                    # Build command
+                    gender_byte = 0x01 if profile["gender"] == "male" else 0x00
+                    command = bytes([0xE7, 0x41]) + struct.pack(
+                        "BBBBBBBB",
+                        user_id,
+                        gender_byte,
+                        profile["age"],
+                        profile["height"],
+                        0x03,  # Activity level
+                        0x00,
+                        0x00,
+                        0x00,  # Reserved
+                    )
+
                     await client.write_gatt_char(
-                        CHARACTERISTIC_UUID, user_cmd, response=False
+                        CHARACTERISTIC_UUID, command, response=False
                     )
 
                     # Wait for response
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(1)
 
-                except Exception as e:
-                    _LOGGER.error(f"Failed to request user {user_id} data: {e}")
+                # Process any notifications received
+                for data in self._notification_buffer:
+                    self._process_notification(data)
 
-            # Extra wait for any delayed responses
-            await asyncio.sleep(2)
-
-            # Stop notifications
-            try:
+                # Stop notifications
                 await client.stop_notify(CHARACTERISTIC_UUID)
-                _LOGGER.debug("Notifications stopped")
-            except:
-                pass
 
-            if received_data:
-                _LOGGER.info(
-                    f"✓ Successfully received {len(received_data)} data packets"
-                )
-            else:
-                _LOGGER.warning("No data received from scale")
+                _LOGGER.info("Data collection complete")
 
-                # Try a direct read as fallback
-                try:
-                    data = await client.read_gatt_char(CHARACTERISTIC_UUID)
-                    _LOGGER.info(f"Direct read succeeded: {data.hex()}")
-                    self._parse_measurement(data)
-                except Exception as e:
-                    _LOGGER.debug(f"Direct read also failed: {e}")
+            finally:
+                # Always disconnect
+                if client.is_connected:
+                    await client.disconnect()
+                    _LOGGER.debug("Disconnected")
 
         except Exception as e:
-            _LOGGER.error(f"Communication error: {e}")
+            _LOGGER.error(f"Connection error: {e}")
 
-    def _parse_measurement(self, data: bytes):
-        """Parse measurement data from scale."""
-        if not data or len(data) < 10:
-            _LOGGER.debug(f"Data too short: {len(data) if data else 0} bytes")
+    def _process_notification(self, data: bytearray):
+        """Process a notification from the scale."""
+        if len(data) < 10:
+            _LOGGER.debug(f"Short notification: {data.hex()}")
             return
 
-        _LOGGER.info(f"Parsing measurement: {data.hex()}")
+        _LOGGER.info(f"Processing notification of {len(data)} bytes")
 
-        # Try to extract weight from common positions
-        weight_found = False
-
-        for position in [7, 8, 6, 4, 5, 9]:
-            if position + 2 <= len(data):
-                try:
-                    # Parse as little-endian unsigned short, divide by 10
-                    weight_raw = struct.unpack("<H", data[position : position + 2])[0]
+        # Try to parse as measurement
+        # The exact format varies, but weight is usually reliable
+        try:
+            # Try to find weight (usually 2 bytes in 0.1 kg units)
+            # Common positions: bytes 7-8, 8-9, or 6-7
+            for pos in [7, 8, 6]:
+                if pos + 2 <= len(data):
+                    weight_raw = struct.unpack("<H", data[pos : pos + 2])[0]
                     weight = weight_raw / 10.0
 
-                    # Validate weight range
+                    # Validate weight
                     if 2.0 <= weight <= 300.0:
                         _LOGGER.info(
-                            f"✓✓✓ WEIGHT FOUND: {weight} kg at byte {position}"
+                            f"Found valid weight at position {pos}: {weight} kg"
                         )
 
-                        # Try to identify user
-                        user_id = 1  # Default
-                        for uid_pos in [2, 3, 1, 0]:
+                        # Try to identify user (usually byte 2 or 3)
+                        user_id = None
+                        for uid_pos in [2, 3, 1]:
                             if uid_pos < len(data) and data[uid_pos] in USER_PROFILES:
                                 user_id = data[uid_pos]
-                                _LOGGER.debug(
-                                    f"User ID {user_id} found at byte {uid_pos}"
-                                )
                                 break
 
-                        # Update measurements
+                        if not user_id:
+                            # Default to user 1 if can't identify
+                            user_id = 1
+                            _LOGGER.warning(
+                                "Could not identify user, defaulting to user 1"
+                            )
+
+                        # Update measurements for this user
+                        user = USER_PROFILES[user_id]
                         self._measurements[user_id]["weight"] = round(weight, 1)
                         self._measurements[user_id]["timestamp"] = datetime.now()
 
-                        # Calculate BMI
-                        profile = USER_PROFILES[user_id]
-                        height_m = profile["height"] / 100
-                        bmi = weight / (height_m**2)
-                        self._measurements[user_id]["bmi"] = round(bmi, 1)
+                        # Try to parse other measurements if data is long enough
+                        if len(data) >= 20:
+                            try:
+                                self._measurements[user_id]["body_fat"] = (
+                                    round(struct.unpack("<H", data[9:11])[0] / 10.0, 1)
+                                    if data[9:11] != b"\xff\xff"
+                                    else 0.0
+                                )
 
-                        # Try to parse additional measurements if available
-                        if len(data) >= position + 10:
-                            self._parse_extended(data, position + 2, user_id)
+                                self._measurements[user_id]["water"] = (
+                                    round(struct.unpack("<H", data[11:13])[0] / 10.0, 1)
+                                    if data[11:13] != b"\xff\xff"
+                                    else 0.0
+                                )
 
-                        weight_found = True
-                        _LOGGER.info(
-                            f"Updated {profile['name']}: {weight} kg, BMI: {round(bmi, 1)}"
-                        )
+                                self._measurements[user_id]["muscle"] = (
+                                    round(struct.unpack("<H", data[13:15])[0] / 10.0, 1)
+                                    if data[13:15] != b"\xff\xff"
+                                    else 0.0
+                                )
+
+                                self._measurements[user_id]["bone_mass"] = (
+                                    round(struct.unpack("<H", data[15:17])[0] / 10.0, 1)
+                                    if data[15:17] != b"\xff\xff"
+                                    else 0.0
+                                )
+
+                                # Calculate BMI
+                                height_m = user["height"] / 100
+                                self._measurements[user_id]["bmi"] = round(
+                                    weight / (height_m**2), 1
+                                )
+
+                                _LOGGER.info(
+                                    f"Updated full measurements for {user['name']}"
+                                )
+                            except Exception as e:
+                                _LOGGER.debug(
+                                    f"Could not parse additional measurements: {e}"
+                                )
+
+                        _LOGGER.info(f"Updated weight for {user['name']}: {weight} kg")
                         break
 
-                except Exception as e:
-                    _LOGGER.debug(f"Parse error at position {position}: {e}")
-
-        if not weight_found:
-            _LOGGER.warning(f"No valid weight found in {len(data)} bytes")
-            # Log raw bytes for debugging
-            hex_str = " ".join([f"{b:02x}" for b in data[:20]])
-            _LOGGER.debug(f"First 20 bytes: {hex_str}")
-
-    def _parse_extended(self, data: bytes, start_pos: int, user_id: int):
-        """Parse extended measurements."""
-        try:
-            # Body fat
-            if start_pos + 2 <= len(data):
-                body_fat = (
-                    struct.unpack("<H", data[start_pos : start_pos + 2])[0] / 10.0
-                )
-                if 0.1 <= body_fat <= 80.0:
-                    self._measurements[user_id]["body_fat"] = round(body_fat, 1)
-                    _LOGGER.debug(f"Body fat: {body_fat}%")
-
-            # Water
-            if start_pos + 4 <= len(data):
-                water = (
-                    struct.unpack("<H", data[start_pos + 2 : start_pos + 4])[0] / 10.0
-                )
-                if 0.1 <= water <= 80.0:
-                    self._measurements[user_id]["water"] = round(water, 1)
-                    _LOGGER.debug(f"Water: {water}%")
-
-            # Muscle
-            if start_pos + 6 <= len(data):
-                muscle = (
-                    struct.unpack("<H", data[start_pos + 4 : start_pos + 6])[0] / 10.0
-                )
-                if 0.1 <= muscle <= 80.0:
-                    self._measurements[user_id]["muscle"] = round(muscle, 1)
-                    _LOGGER.debug(f"Muscle: {muscle}%")
-
         except Exception as e:
-            _LOGGER.debug(f"Extended parse error: {e}")
+            _LOGGER.error(f"Failed to process notification: {e}")
