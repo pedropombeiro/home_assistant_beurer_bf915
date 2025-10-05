@@ -1,5 +1,4 @@
 """Constants for the Beurer BF 915 integration."""
-
 from datetime import timedelta
 
 # Integration domain

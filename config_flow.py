@@ -14,7 +14,7 @@ from homeassistant.data_entry_flow import FlowResult
 
 from .const import DOMAIN
 
-_LOGGER = logging.getLogger("Beurer")
+_LOGGER = logging.getLogger("beurer_bf915")
 
 # Add CONF_NAME if not imported
 CONF_NAME = "BeurerBF"
